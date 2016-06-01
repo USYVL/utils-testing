@@ -1,0 +1,297 @@
+#!/bin/sh
+################################################################################
+# 2008-07-21  Aaron Martin
+#
+# This script started out as a Mac OSX StartupItem script, (and may still be easiy
+# alterable to work that way).
+#
+# But at least its first use will be just to build a static conf file for 
+# a simpler Firewall StartupItem.
+#
+# It was created by me, but borrowed heavily on other folks work 
+# The looping rules may be somewhat redundant, as I think ipfw can take a comma
+# separated list of IPs anyway, but I think it provides a bit neater output.
+#
+# The other question that I have not resolved yet, is whether its just simpler
+# to output this stuff to /etc/ipfw.conf and then flush and read in the file...
+# that was my previous way of doing this, and worked quite nicely, could do 
+# something similar here without too much issue....
+#
+# ~/bin/buildipfwconf > /etc/ipfw.conf
+# ipfw -q flush
+# ipfw /etc/ipfw.conf
+# 
+# the have the following in /etc/rc.local
+#. /etc/rc.common
+#
+# /sbin/ipfw -fq flush
+# /sbin/ipfw /etc/ipfw.conf 
+#
+# The plist should reflect the Resolver as a requirement as this script needs
+# to resolve hostnames for the ntp functionality
+################################################################################
+v=
+debug=
+
+# identify conf file
+IPFWCONF=/etc/ipfw.conf
+
+# define the IPFW command to use, or echo to just output the conf info
+IPFW=echo
+rule=1000
+
+################################################################################
+nextRule(){
+  rulestr=`printf "%05d" $rule`
+  rule=`expr $rule + 10 `
+}
+################################################################################
+addRule(){
+  nextRule
+  ${IPFW} add ${rulestr} $1 
+}
+################################################################################
+splitFromTo(){
+  if [ `echo $1 | grep -c ':'` -eq 0 ]; then
+    fip=$1
+    fpt=
+  else
+    fip=`echo $1 | cut -d: -f1`
+    fpt=`echo $1 | cut -d: -f2`
+  fi
+
+  if [ `echo $2 | grep -c ':'` -eq 0 ]; then
+    tip=$2
+    tpt=
+  else
+    tip=`echo $2 | cut -d: -f1`
+    tpt=`echo $2 | cut -d: -f2`
+  fi
+}
+################################################################################
+allowLoopOut(){
+  splitFromTo $2 $3
+
+  for to in `echo $tip | tr ',' ' '`
+  do
+    nextRule
+    ${IPFW} add ${rulestr} allow $1 from $fip $fpt to $to $tpt out "// $4"
+  done
+}
+################################################################################
+allowLoopIn(){
+  splitFromTo $2 $3
+
+  for from in `echo $fip | tr ',' ' '`
+  do
+    nextRule
+    ${IPFW} add ${rulestr} allow $1 from $from $fpt to $tip $tpt in "// $4"
+  done
+}
+################################################################################
+allowRule(){
+  nextRule
+  ${IPFW} add ${rulestr} allow $1 from $2 to $3 $4 
+}
+################################################################################
+denyRule(){
+  nextRule
+  ${IPFW} add ${rulestr} deny $1 from $2 to $3 $4 
+}
+################################################################################
+setNTPAddresses(){
+  NTP_IPS=
+
+  if [ ! -f $1 ]; then
+    return
+  fi
+
+  for server in `grep '^server' $1 | cut -d' ' -f2`
+  do
+    for ip in `host $server | grep 'has address' | cut -d' ' -f4`
+    do
+      if [ ! "$NTP_IPS" ]; then
+        NTP_IPS="$ip"
+      else
+        NTP_IPS="$NTP_IPS,$ip"
+      fi
+    done
+  done
+}
+################################################################################
+setNSAddresses(){
+    NS_IPS=
+    
+    if [ ! -f $1 ]; then
+        return
+    fi
+    
+    for ip in `grep '^nameserver' $1 | cut -d' ' -f2 `
+    do
+        if [ ! "$NS_IPS" ]; then
+            NS_IPS="$ip"
+        else
+            NS_IPS="$NS_IPS,$ip"
+        fi
+    done
+}
+################################################################################
+################################################################################
+StartService(){
+    # Initialize first rule address, this may also be done above for safety
+    rule=1000
+    
+    # run some helper scripts to set some IP lists for us
+    setNSAddresses /etc/resolv.conf  # sets NS_IPS
+    setNTPAddresses /etc/ntp.conf    # sets NTP_IPS
+    
+    # set some local variables to be used in the scripts
+    USER_IPS=68.227.80.47,128.111.236.8,128.111.236.88
+    SWU_IPS=17.250.248.95,69.22.138.0/24,17.250.248.93
+    
+    # start building rules
+    allowRule ip any any 'via lo*'
+    denyRule ip '127.0.0.0/8' any in
+    denyRule ip any '127.0.0.0/8' in
+    denyRule ip '224.0.0.0/3' any in
+    denyRule ip any '224.0.0.0/3' in
+    addRule 'check-state'
+    denyRule 'log ip' any any 'frag'
+    # This established in rule seems to lock out previously connected clients on ipfw reload
+    # and prevents them from getting back in.  Claimed to prevent spoofed connections...
+    #denyRule tcp any 'any established' 'in'
+    denyRule 'log all' any any 'not verrevpath in'
+    allowRule tcp any any  established
+    
+    rule=2000
+    allowLoopIn tcp $USER_IPS any:80       'HTTP inbound'
+    allowLoopIn tcp 10.10.10.0/24 any:80   'LAN HTTP'
+    allowLoopIn tcp $USER_IPS any:22       'SSH inbound'
+    allowLoopIn tcp $USER_IPS any:5900     'ARD-VNC inbound'
+    allowLoopIn tcp $USER_IPS any:3283     'ARD inbound'
+    
+    # DHCP client support, may not want this for static/manual IPs
+    allowRule udp 'any 67' 'any dst-port 68' 'in // DHCP client support'
+    
+    # Allow system to check some specific RSYNC servers
+    allowLoopOut tcp any $USER_IPS:873     'RSYNCD'
+    
+    # Allow apple software update
+    allowLoopOut tcp any $SWU_IPS:80 'apple-swupdate Software Update'
+    
+    # Allow NTP traffic
+    allowLoopIn udp $NTP_IPS:123 any      'NTP Server'
+    allowLoopOut udp any $NTP_IPS:123     'NTP Server'
+    
+    rule=60000
+    #allowRule icmp any any
+    allowRule icmp any any 'icmptypes 3,11,12'
+    allowRule icmp any any 'icmptypes 0 in'
+    allowRule icmp any any 'icmptypes 8 out'
+    
+    # Allow NS (NameServer DNS) requests inbound and outbound to /etc/resolv.conf servers
+    # Allow some outbound mDNS and SLP requests
+    allowLoopOut  ip  any     $NS_IPS:53   'ISP provided DNS'
+    allowLoopIn   udp $NS_IPS:53 any       'ISP provided DNS'
+    allowRule udp me 'any 5353' 'out // mDNS'
+    allowRule udp me 'any 427' 'out // rendezvous (SLP?)'
+
+    allowRule udp 'me 68' 'any 67' 'out // DHCP client renewals'
+    
+    # Quiet the noisy windows traffic (deny, but dont log)
+    rule=65000
+    denyRule ip 'any 137' any '// quiet local Windows broadcasts'
+    denyRule udp any 'any 137' '// quiet local Windows broadcasts'
+    denyRule udp any 'any 3052' '// quiet UPS broadcasts'
+    denyRule ip 'any 138' any '// quiet local Windows broadcasts'
+    denyRule ip 'any 520' any '// quiet local Windows broadcasts'
+    denyRule 'log ip' 'any' any '// log any other denys'
+    
+    rule=65535
+    allowRule ip any any '// I dont think we can actually get here'
+}
+################################################################################
+################################################################################
+StopService (){
+    ${IPFW} -fq flush;
+    ERROR_NUMBER=${?};
+    if [[ ${ERROR_NUMBER} == "0" ]]; then 
+        ConsoleMessage "Firewall has been stopped";
+    else
+        ConsoleMessage "There was a problem stopping the Firewall";
+        exit 1;
+    fi
+ }
+
+################################################################################
+################################################################################
+RestartService (){
+    StopService
+    StartService
+}
+################################################################################
+
+
+fwu_unload(){
+  /sbin/ipfw -fq flush
+  /sbin/ipfw disable firewall
+}
+fwu_load(){
+  if [ -f ${IPFWCONF} ]; then
+    if [ "$v" ]; then
+      /usr/sbin/sysctl -w net.inet.ip.fw.verbose=1
+      /sbin/ipfw -fq flush
+      /sbin/ipfw ${IPFWCONF}
+    else 
+      /usr/sbin/sysctl -w net.inet.ip.fw.verbose=1 > /dev/null
+      /sbin/ipfw -fq flush
+      /sbin/ipfw ${IPFWCONF}  > /dev/null
+    fi
+  fi
+}
+fwu_create(){
+  StartService > ${IPFWCONF}
+}
+fwu_echo(){
+  StartService
+}
+fwu_reload(){
+  fwu_create
+  fwu_load
+}
+
+if [ $# -eq 0 ]; then
+  echo "no command line args, do default action"
+  fwu_echo
+fi
+
+while [ $# -gt 0 ]
+do
+  case $1 in 
+    -v)       v=1   ;;
+    -d)       debug=1  ;;
+    reload)   fwu_reload  ;;
+    load)     fwu_load ;;
+    unload)   fwu_unload ;;
+    create)   fwu_create ;;
+    *)        ;;
+  esac
+  shift
+done
+
+#RunService "${1:-start}";
+
+
+
+  
+
+#!/bin/sh
+
+# would be nice to gather this info from the /etc/rc.local file....
+
+#~aaron/bin/firewall > ${IPFWCONF} 
+
+#/etc/rc.local
+#
+#/sbin/ipfw -fq flush
+#/sbin/ipfw ${CONF}

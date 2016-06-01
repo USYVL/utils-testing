@@ -1,0 +1,30 @@
+2008-07-21
+  I am trying to collect all the pieces that a usyvl machine needs to have
+  to be configured....
+
+  # OSX setup
+  3 Administrator Accounts, Administrator (admin), Aaron Martin (aaron), Randy (randy)
+  1 Standard account: Game Days (gamedays)
+
+  rsync-3.x
+  apache webserver
+  php build with pdflib and --enable-ftp at a minimum (php.ini may need to enable pdf module)
+  ln -s /Library/Webserver/Documents /www
+
+  # Website contents
+  /www/usyvl/donate
+  /www/usyvl/scheduling
+
+  # a whole bunch of files are stored in the files heirarchy.  Those can be rsynced over 
+  favicon.ico (in correct location)....
+
+  # Rsync is very desirable
+  # should set up a LaunchDaemon to rsync to the phplib stuff
+  # could also use this to rsync the files heirarchy to the destination computer
+
+  # Firewall setup
+  /usr/local/sbin/firewallutil
+  /etc/rc.local (modified)
+
+  # from this dir
+  scp -r ./files/Users/Shared/* stadm-g4:/Users/Shared
